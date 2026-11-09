@@ -1,25 +1,53 @@
-/* CustomerTable.jsx — Searchable and paginated table of customer-level CATE estimates */
+/* CustomerTable.jsx — Searchable, filterable, and exportable customer CATE lift table */
 import { useState, useMemo } from 'react';
 
-export default function CustomerTable({ analysisResult }) {
+export default function CustomerTable({ analysisResult, onToast }) {
   if (!analysisResult || !analysisResult.customer_ids) return null;
 
   const { customer_ids, cate_values, cate_lower, cate_upper } = analysisResult;
 
   const [search, setSearch] = useState('');
-  const [filterType, setFilterType] = useState('all'); // 'all', 'positive', 'negative'
-  const [sortOrder, setSortOrder] = useState('desc'); // 'desc' (highest lift first), 'asc'
+  const [filterType, setFilterType] = useState('all');
+  const [sortOrder, setSortOrder] = useState('desc');
   const [page, setPage] = useState(1);
   const pageSize = 15;
 
-  // Build rows array
+  // Build rows array with categorization
   const rows = useMemo(() => {
-    return customer_ids.map((id, index) => ({
-      customer_id: id,
-      cate: cate_values[index] ?? 0,
-      lower: cate_lower?.[index] ?? 0,
-      upper: cate_upper?.[index] ?? 0,
-    }));
+    return customer_ids.map((id, index) => {
+      const cate = cate_values[index] ?? 0;
+      const lower = cate_lower?.[index] ?? 0;
+      const upper = cate_upper?.[index] ?? 0;
+
+      let category = 'marginal';
+      let categoryBadge = 'badge-no';
+      let categoryLabel = 'Low Lift (0-5%)';
+
+      if (cate > 0.15) {
+        category = 'high';
+        categoryBadge = 'badge-pass';
+        categoryLabel = '🎯 High Lift (>15%)';
+      } else if (cate > 0.05) {
+        category = 'moderate';
+        categoryBadge = 'badge-blue';
+        categoryLabel = '⚡ Moderate (5-15%)';
+      } else if (cate <= 0) {
+        category = 'negative';
+        categoryBadge = 'badge-fail';
+        categoryLabel = '⛔ Do Not Discount (≤0%)';
+      }
+
+      return {
+        customer_id: id,
+        cate,
+        catePercent: (cate * 100).toFixed(2),
+        lowerPercent: (lower * 100).toFixed(2),
+        upperPercent: (upper * 100).toFixed(2),
+        category,
+        categoryBadge,
+        categoryLabel,
+      };
+    });
   }, [customer_ids, cate_values, cate_lower, cate_upper]);
 
   // Filter & sort
@@ -31,14 +59,21 @@ export default function CustomerTable({ analysisResult }) {
       result = result.filter(r => r.customer_id.toLowerCase().includes(q));
     }
 
-    if (filterType === 'positive') {
+    if (filterType === 'high') {
+      result = result.filter(r => r.category === 'high');
+    } else if (filterType === 'moderate') {
+      result = result.filter(r => r.category === 'moderate');
+    } else if (filterType === 'positive') {
       result = result.filter(r => r.cate > 0);
     } else if (filterType === 'negative') {
-      result = result.filter(r => r.cate <= 0);
+      result = result.filter(r => r.category === 'negative');
     }
 
     result = [...result].sort((a, b) => {
-      return sortOrder === 'desc' ? b.cate - a.cate : a.cate - b.cate;
+      if (sortOrder === 'desc') return b.cate - a.cate;
+      if (sortOrder === 'asc') return a.cate - b.cate;
+      if (sortOrder === 'id') return a.customer_id.localeCompare(b.customer_id);
+      return 0;
     });
 
     return result;
@@ -48,129 +83,175 @@ export default function CustomerTable({ analysisResult }) {
   const currentPage = Math.min(page, totalPages);
   const pagedRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
+  // Export to CSV function
+  function handleExportCsv() {
+    try {
+      const headers = ['customer_id', 'cate_lift_pct', 'ci_95_lower_pct', 'ci_95_upper_pct', 'recommendation'];
+      const csvRows = [headers.join(',')];
+
+      filteredRows.forEach(r => {
+        csvRows.push([
+          r.customer_id,
+          r.catePercent,
+          r.lowerPercent,
+          r.upperPercent,
+          `"${r.categoryLabel.replace(/"/g, '""')}"`,
+        ].join(','));
+      });
+
+      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `customer_cate_lift_${new Date().toISOString().slice(0, 10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      if (onToast) onToast(`Exported ${filteredRows.length} customer CATE records to CSV`, 'success');
+    } catch (err) {
+      console.error('CSV export failed:', err);
+      if (onToast) onToast('Export failed', 'error');
+    }
+  }
+
   return (
-    <div className="card" id="customer-table-card">
+    <div className="card" id="step-customer-table">
       <div className="card-header">
         <span className="card-icon">👥</span>
         <div style={{ flex: 1 }}>
           <h2>Individual Customer Treatment Effects (CATE)</h2>
           <p style={{ margin: 0, fontSize: '0.85rem' }}>
-            Personalized causal lift estimates and 95% confidence bounds
+            Personalized causal lift predictions, confidence intervals, and discount targeting priority
           </p>
         </div>
-        <span className="badge badge-yes">
-          {filteredRows.length.toLocaleString()} matching customers
-        </span>
+        <button
+          className="btn btn-secondary btn-sm"
+          type="button"
+          onClick={handleExportCsv}
+          title="Export current filtered table to CSV"
+        >
+          <span>📥</span> Export Table (.csv)
+        </button>
       </div>
 
+      {/* Filter and Search Bar */}
       <div className="filter-bar">
-        <input
-          type="text"
-          placeholder="Search by Customer ID (e.g. C001)..."
-          value={search}
-          onChange={e => { setSearch(e.target.value); setPage(1); }}
-          id="customer-search-input"
-          style={{ maxWidth: '280px' }}
-        />
+        <div style={{ flex: 1, minWidth: '220px' }}>
+          <input
+            type="text"
+            placeholder="Search Customer ID (e.g. C0042)..."
+            value={search}
+            onChange={e => { setSearch(e.target.value); setPage(1); }}
+            id="customer-search-input"
+          />
+        </div>
 
-        <select
-          value={filterType}
-          onChange={e => { setFilterType(e.target.value); setPage(1); }}
-          id="customer-filter-select"
-          style={{ maxWidth: '200px' }}
-        >
-          <option value="all">All Customers</option>
-          <option value="positive">Lift &gt; 0 (Persuadable)</option>
-          <option value="negative">Lift ≤ 0 (Do Not Discount)</option>
-        </select>
+        <div style={{ minWidth: '180px' }}>
+          <select
+            value={filterType}
+            onChange={e => { setFilterType(e.target.value); setPage(1); }}
+            id="customer-filter-select"
+          >
+            <option value="all">All Lift Categories</option>
+            <option value="high">🎯 High Lift (&gt;15%)</option>
+            <option value="moderate">⚡ Moderate Lift (5-15%)</option>
+            <option value="positive">All Positive Lift (&gt;0%)</option>
+            <option value="negative">⛔ Zero / Negative Lift (&le;0%)</option>
+          </select>
+        </div>
 
-        <select
-          value={sortOrder}
-          onChange={e => setSortOrder(e.target.value)}
-          id="customer-sort-select"
-          style={{ maxWidth: '220px' }}
-        >
-          <option value="desc">Sort: Highest Lift First</option>
-          <option value="asc">Sort: Lowest Lift First</option>
-        </select>
+        <div style={{ minWidth: '180px' }}>
+          <select
+            value={sortOrder}
+            onChange={e => setSortOrder(e.target.value)}
+            id="customer-sort-select"
+          >
+            <option value="desc">Sort: Highest Lift First</option>
+            <option value="asc">Sort: Lowest Lift First</option>
+            <option value="id">Sort: Customer ID</option>
+          </select>
+        </div>
       </div>
 
+      {/* Table view */}
       <div className="table-wrapper">
         <table>
           <thead>
             <tr>
               <th>Customer ID</th>
-              <th>Estimated CATE (Lift)</th>
+              <th>Estimated CATE Lift</th>
               <th>95% Confidence Interval</th>
-              <th>Recommendation</th>
+              <th>Targeting Recommendation</th>
             </tr>
           </thead>
           <tbody>
-            {pagedRows.length === 0 ? (
-              <tr>
-                <td colSpan={4} style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)' }}>
-                  No customer records match the current filters.
+            {pagedRows.map(row => (
+              <tr key={row.customer_id}>
+                <td>
+                  <code style={{ background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: '4px' }}>
+                    {row.customer_id}
+                  </code>
+                </td>
+                <td>
+                  <strong style={{ color: row.cate > 0 ? 'var(--accent-green)' : 'var(--accent-red)', fontSize: '0.95rem' }}>
+                    {row.cate > 0 ? `+${row.catePercent}%` : `${row.catePercent}%`}
+                  </strong>
+                </td>
+                <td style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>
+                  [{row.lowerPercent}%, {row.upperPercent}%]
+                </td>
+                <td>
+                  <span className={`badge ${row.categoryBadge}`}>
+                    {row.categoryLabel}
+                  </span>
                 </td>
               </tr>
-            ) : (
-              pagedRows.map(row => {
-                const liftPct = (row.cate * 100).toFixed(2);
-                const lowerPct = (row.lower * 100).toFixed(2);
-                const upperPct = (row.upper * 100).toFixed(2);
-                const isPositive = row.cate > 0;
-
-                return (
-                  <tr key={row.customer_id}>
-                    <td>
-                      <code>{row.customer_id}</code>
-                    </td>
-                    <td>
-                      <strong style={{ color: isPositive ? 'var(--accent-green)' : 'var(--text-muted)' }}>
-                        {isPositive ? `+${liftPct}%` : `${liftPct}%`}
-                      </strong>
-                    </td>
-                    <td>
-                      <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>
-                        [{lowerPct}%, {upperPct}%]
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`badge ${isPositive ? 'badge-yes' : 'badge-no'}`}>
-                        {isPositive ? 'Discount Recommended' : 'No Discount'}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })
+            ))}
+            {pagedRows.length === 0 && (
+              <tr>
+                <td colSpan={4} style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)' }}>
+                  No customer records matched your search or filter criteria.
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
       </div>
 
       {/* Pagination controls */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '16px' }}>
-        <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-          Showing {(currentPage - 1) * pageSize + 1} - {Math.min(currentPage * pageSize, filteredRows.length)} of {filteredRows.length} customers
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '12px',
+          marginTop: '16px',
+          paddingTop: '12px',
+          borderTop: '1px solid var(--border)',
+        }}
+      >
+        <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+          Showing <strong>{pagedRows.length}</strong> of <strong>{filteredRows.length.toLocaleString()}</strong> customers (Page {currentPage} of {totalPages})
         </span>
+
         <div style={{ display: 'flex', gap: '8px' }}>
           <button
-            className="btn btn-secondary"
-            style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+            className="btn btn-secondary btn-sm"
+            type="button"
             disabled={currentPage <= 1}
             onClick={() => setPage(p => Math.max(1, p - 1))}
           >
-            ← Previous
+            &larr; Previous
           </button>
-          <span style={{ padding: '6px 10px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-            Page {currentPage} of {totalPages}
-          </span>
           <button
-            className="btn btn-secondary"
-            style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+            className="btn btn-secondary btn-sm"
+            type="button"
             disabled={currentPage >= totalPages}
             onClick={() => setPage(p => Math.min(totalPages, p + 1))}
           >
-            Next →
+            Next &rarr;
           </button>
         </div>
       </div>
